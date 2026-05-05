@@ -6,6 +6,8 @@
 <title>COMPRESS — Advanced Media Optimizer</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;700;800&family=DM+Mono:wght@300;400;500&display=swap" rel="stylesheet">
+<script src="https://unpkg.com/@ffmpeg/ffmpeg@0.12.10/dist/umd/ffmpeg.js"></script>
+<script src="https://unpkg.com/@ffmpeg/util@0.12.1/dist/umd/index.js"></script>
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -586,6 +588,33 @@
   }
   .tooltip:hover::after { opacity: 1; }
 
+  /* FFmpeg loader banner */
+  .ffmpeg-banner {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 14px 20px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 20px;
+    font-size: 11px;
+    color: var(--muted);
+    letter-spacing: 1px;
+  }
+  .ffmpeg-banner.ready { border-color: rgba(184,255,87,0.4); color: var(--success); }
+  .ffmpeg-banner.error { border-color: rgba(255,77,109,0.4); color: var(--error); }
+  .ffmpeg-spinner {
+    width: 14px; height: 14px;
+    border: 2px solid var(--border);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+    flex-shrink: 0;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .ffmpeg-icon { font-size: 16px; flex-shrink: 0; }
+
   @media (max-width: 600px) {
     .settings-panel { grid-template-columns: 1fr; }
     .settings-panel .full { grid-column: 1; }
@@ -608,6 +637,12 @@
       TOTAL SAVED
     </div>
   </header>
+
+  <!-- FFmpeg Status -->
+  <div class="ffmpeg-banner" id="ffmpegBanner">
+    <div class="ffmpeg-spinner" id="ffmpegSpinner"></div>
+    <span id="ffmpegStatus">Loading FFmpeg engine for MP4 compression…</span>
+  </div>
 
   <!-- Drop Zone -->
   <div class="drop-zone" id="dropZone">
@@ -703,9 +738,51 @@
 </div>
 
 <script>
+// ── FFmpeg setup ───────────────────────────────────────────────────────
+const { FFmpeg } = FFmpegWASM;
+const { fetchFile, toBlobURL } = FFmpegUtil;
+let ffmpeg = null;
+let ffmpegReady = false;
+
+async function loadFFmpeg() {
+  const banner = document.getElementById('ffmpegBanner');
+  const status = document.getElementById('ffmpegStatus');
+  const spinner = document.getElementById('ffmpegSpinner');
+  try {
+    ffmpeg = new FFmpeg();
+    ffmpeg.on('log', ({ message }) => { /* console.log(message) */ });
+    ffmpeg.on('progress', ({ progress }) => {
+      if (window._currentFFmpegEntry) {
+        setProgress(window._currentFFmpegEntry, Math.min(92, 5 + progress * 87));
+      }
+    });
+
+    const baseURL = 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd';
+    await ffmpeg.load({
+      coreURL: await toBlobURL(`${baseURL}/ffmpeg-core.js`, 'text/javascript'),
+      wasmURL: await toBlobURL(`${baseURL}/ffmpeg-core.wasm`, 'application/wasm'),
+    });
+
+    ffmpegReady = true;
+    banner.classList.add('ready');
+    spinner.style.display = 'none';
+    banner.querySelector('.ffmpeg-icon') && (banner.querySelector('.ffmpeg-icon').textContent = '✅');
+    status.textContent = 'FFmpeg ready — MP4 (H.264) video compression enabled';
+
+    // Replace spinner with icon
+    banner.innerHTML = `<span class="ffmpeg-icon">✅</span><span>FFmpeg ready — MP4 (H.264) video compression enabled</span>`;
+    banner.classList.add('ready');
+  } catch (err) {
+    banner.classList.add('error');
+    spinner.style.display = 'none';
+    banner.innerHTML = `<span class="ffmpeg-icon">⚠️</span><span>FFmpeg failed to load. Videos will still compress as WebM. (${err.message})</span>`;
+  }
+}
+loadFFmpeg();
+
 // ── State ──────────────────────────────────────────────────────────────
 const state = {
-  files: [],   // { id, file, type, thumbUrl, status, originalSize, compressedSize, blob, ext }
+  files: [],
   nextId: 1,
   settings: {
     imgQuality: 80,
@@ -729,7 +806,6 @@ document.getElementById('imgQuality').addEventListener('input', e => {
   state.settings.imgQuality = +e.target.value;
   document.getElementById('imgQualityVal').textContent = e.target.value + '%';
 });
-
 document.getElementById('vidQuality').addEventListener('input', e => {
   state.settings.vidQuality = +e.target.value;
   document.getElementById('vidQualityVal').textContent = e.target.value;
@@ -765,19 +841,11 @@ function addFiles(files) {
     const isImage = file.type.startsWith('image/');
     const isVideo = file.type.startsWith('video/');
     if (!isImage && !isVideo) return;
-
     const id = state.nextId++;
     const entry = { id, file, type: isImage ? 'image' : 'video', thumbUrl: null,
                     status: 'pending', originalSize: file.size, compressedSize: null, blob: null, ext: '' };
     state.files.push(entry);
-
-    // Generate thumbnail
-    if (isImage) {
-      const url = URL.createObjectURL(file);
-      entry.thumbUrl = url;
-    } else {
-      entry.thumbUrl = null; // video icon
-    }
+    if (isImage) entry.thumbUrl = URL.createObjectURL(file);
     renderItem(entry);
   });
   updateCompressBtn();
@@ -785,30 +853,22 @@ function addFiles(files) {
 
 // ── Render file item ───────────────────────────────────────────────────
 function renderItem(entry) {
-  const existing = document.getElementById(`item-${entry.id}`);
-  if (existing) { existing.remove(); }
-
   const div = document.createElement('div');
   div.className = 'file-item ' + (entry.status === 'done' ? 'done' : entry.status === 'error' ? 'error' : entry.status === 'processing' ? 'processing' : '');
   div.id = `item-${entry.id}`;
 
   const thumbHtml = entry.type === 'image' && entry.thumbUrl
-    ? `<img src="${entry.thumbUrl}" alt="">`
-    : entry.type === 'video' ? `🎬` : `🖼️`;
+    ? `<img src="${entry.thumbUrl}" alt="">` : entry.type === 'video' ? `🎬` : `🖼️`;
 
   const sizeDiff = entry.compressedSize !== null
-    ? Math.round((1 - entry.compressedSize / entry.originalSize) * 100)
-    : null;
+    ? Math.round((1 - entry.compressedSize / entry.originalSize) * 100) : null;
 
   const metaHtml = entry.status === 'pending'
     ? `<span>${fmtSize(entry.originalSize)}</span><span>ready</span>`
     : entry.status === 'processing'
-    ? `<span>${fmtSize(entry.originalSize)}</span><span>processing...</span>`
+    ? `<span>${fmtSize(entry.originalSize)}</span><span id="prog-label-${entry.id}">processing…</span>`
     : entry.status === 'done'
-    ? `<span>${fmtSize(entry.originalSize)}</span>
-       <span>→</span>
-       <span>${fmtSize(entry.compressedSize)}</span>
-       <span class="saving">−${sizeDiff}%</span>`
+    ? `<span>${fmtSize(entry.originalSize)}</span><span>→</span><span>${fmtSize(entry.compressedSize)}</span><span class="saving">−${sizeDiff}%</span>`
     : `<span class="error-msg">${entry.errorMsg || 'Error'}</span>`;
 
   const actionHtml = entry.status === 'done'
@@ -817,8 +877,7 @@ function renderItem(entry) {
     : `<button class="remove-btn" onclick="removeFile(${entry.id})">✕</button>`;
 
   const progressHtml = entry.status === 'processing'
-    ? `<div class="progress-bar"><div class="progress-fill" id="prog-${entry.id}" style="width:${entry.progress||5}%"></div></div>`
-    : '';
+    ? `<div class="progress-bar"><div class="progress-fill" id="prog-${entry.id}" style="width:${entry.progress||5}%"></div></div>` : '';
 
   div.innerHTML = `
     <div class="file-thumb">${thumbHtml}</div>
@@ -830,55 +889,42 @@ function renderItem(entry) {
     <div class="file-actions">${actionHtml}</div>
   `;
 
-  if (!document.getElementById(`item-${entry.id}`)) queue.appendChild(div);
-  else document.getElementById(`item-${entry.id}`).replaceWith(div);
+  const existing = document.getElementById(`item-${entry.id}`);
+  if (existing) existing.replaceWith(div);
+  else queue.appendChild(div);
 }
 
 function updateCompressBtn() {
   const pending = state.files.filter(f => f.status === 'pending' || f.status === 'error');
   compressBtn.disabled = pending.length === 0;
-  if (state.files.length === 0) {
-    const qh = document.querySelector('.queue-header');
-    if (qh) qh.style.display = 'none';
-  }
 }
 
 function removeFile(id) {
-  const idx = state.files.findIndex(f => f.id === id);
-  if (idx > -1) state.files.splice(idx, 1);
-  const el = document.getElementById(`item-${id}`);
-  if (el) el.remove();
-  updateCompressBtn();
-  updateSummary();
-  checkDlAll();
+  state.files = state.files.filter(f => f.id !== id);
+  document.getElementById(`item-${id}`)?.remove();
+  updateCompressBtn(); updateSummary(); checkDlAll();
 }
 
 function downloadFile(id) {
   const entry = state.files.find(f => f.id === id);
-  if (!entry || !entry.blob) return;
+  if (!entry?.blob) return;
   const a = document.createElement('a');
   a.href = URL.createObjectURL(entry.blob);
-  const base = entry.file.name.replace(/\.[^.]+$/, '');
-  a.download = `${base}_compressed.${entry.ext}`;
+  a.download = `${entry.file.name.replace(/\.[^.]+$/, '')}_compressed.${entry.ext}`;
   a.click();
 }
 
-// ── Compression ────────────────────────────────────────────────────────
+// ── Compress All ───────────────────────────────────────────────────────
 compressBtn.addEventListener('click', async () => {
   compressBtn.disabled = true;
   const toProcess = state.files.filter(f => f.status === 'pending' || f.status === 'error');
-
   for (const entry of toProcess) {
     entry.status = 'processing';
     entry.progress = 5;
     renderItem(entry);
-
     try {
-      if (entry.type === 'image') {
-        await compressImage(entry);
-      } else {
-        await compressVideo(entry);
-      }
+      if (entry.type === 'image') await compressImage(entry);
+      else await compressVideo(entry);
       entry.status = 'done';
     } catch (err) {
       entry.status = 'error';
@@ -891,7 +937,7 @@ compressBtn.addEventListener('click', async () => {
   updateCompressBtn();
 });
 
-// ── Image Compression ──────────────────────────────────────────────────
+// ── Image Compression (Canvas) ─────────────────────────────────────────
 function compressImage(entry) {
   return new Promise((resolve, reject) => {
     const img = new Image();
@@ -904,29 +950,23 @@ function compressImage(entry) {
           width = Math.round(width * ratio);
           height = Math.round(height * ratio);
         }
-
         const canvas = document.createElement('canvas');
-        canvas.width = width;
-        canvas.height = height;
+        canvas.width = width; canvas.height = height;
         const ctx = canvas.getContext('2d');
-        // White background for formats that don't support transparency
-        if (state.settings.imgFormat === 'jpeg') {
-          ctx.fillStyle = '#fff';
-          ctx.fillRect(0, 0, width, height);
-        }
+        if (state.settings.imgFormat === 'jpeg') { ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, width, height); }
         ctx.drawImage(img, 0, 0, width, height);
-
         setProgress(entry, 70);
 
-        const fmt = state.settings.imgFormat === 'png' ? 'image/png' : state.settings.imgFormat === 'jpeg' ? 'image/jpeg' : 'image/webp';
+        const fmtMap = { webp: 'image/webp', jpeg: 'image/jpeg', png: 'image/png' };
+        const extMap = { webp: 'webp', jpeg: 'jpg', png: 'png' };
+        const fmt = fmtMap[state.settings.imgFormat] || 'image/webp';
         const quality = state.settings.imgFormat === 'png' ? undefined : state.settings.imgQuality / 100;
-        const ext = state.settings.imgFormat === 'png' ? 'png' : state.settings.imgFormat === 'jpeg' ? 'jpg' : 'webp';
 
         canvas.toBlob(blob => {
           if (!blob) { reject(new Error('Canvas compression failed')); return; }
           entry.blob = blob;
           entry.compressedSize = blob.size;
-          entry.ext = ext;
+          entry.ext = extMap[state.settings.imgFormat] || 'webp';
           setProgress(entry, 100);
           resolve();
         }, fmt, quality);
@@ -937,133 +977,79 @@ function compressImage(entry) {
   });
 }
 
-// ── Video Compression ──────────────────────────────────────────────────
+// ── Video Compression (FFmpeg.wasm → MP4) ──────────────────────────────
 async function compressVideo(entry) {
-  // Use MediaRecorder API for video compression
-  return new Promise((resolve, reject) => {
-    const video = document.createElement('video');
-    video.muted = true;
-    video.playsInline = true;
-    const url = URL.createObjectURL(entry.file);
-    video.src = url;
+  if (!ffmpegReady || !ffmpeg) {
+    throw new Error('FFmpeg not ready. Please wait for it to finish loading.');
+  }
 
-    video.onloadedmetadata = () => {
-      const canvas = document.createElement('canvas');
-      let w = video.videoWidth, h = video.videoHeight;
+  window._currentFFmpegEntry = entry;
+  setProgress(entry, 5);
 
-      const resTarget = state.settings.vidRes;
-      if (resTarget !== 'original' && +resTarget < h) {
-        const ratio = +resTarget / h;
-        w = Math.round(w * ratio);
-        h = +resTarget;
-      }
-      // Ensure even dimensions
-      w = w % 2 === 0 ? w : w - 1;
-      h = h % 2 === 0 ? h : h - 1;
+  const inName = `input_${entry.id}.${entry.file.name.split('.').pop() || 'mp4'}`;
+  const outName = `output_${entry.id}.mp4`;
 
-      canvas.width = w;
-      canvas.height = h;
-      const ctx = canvas.getContext('2d');
+  // Write input file into FFmpeg virtual FS
+  await ffmpeg.writeFile(inName, await fetchFile(entry.file));
+  setProgress(entry, 10);
 
-      // Quality → bitrate mapping (CRF-like)
-      const crf = state.settings.vidQuality; // 18 = high, 51 = low
-      const maxBr = 8_000_000, minBr = 200_000;
-      const t = (crf - 18) / (51 - 18);
-      const bitrate = Math.round(maxBr * Math.pow(minBr / maxBr, t));
+  // Build FFmpeg args
+  const crf = state.settings.vidQuality; // 18 high quality, 51 small
+  const args = ['-i', inName];
 
-      const supportedTypes = [
-        'video/webm;codecs=vp9',
-        'video/webm;codecs=vp8',
-        'video/webm',
-      ];
-      const mimeType = supportedTypes.find(t => MediaRecorder.isTypeSupported(t)) || 'video/webm';
+  // Resolution scaling
+  const vidRes = state.settings.vidRes;
+  if (vidRes !== 'original') {
+    // Scale height to target, keep aspect ratio, ensure even dimensions
+    args.push('-vf', `scale=-2:${vidRes}`);
+  }
 
-      let recorder;
-      try {
-        const stream = canvas.captureStream(30);
+  args.push(
+    '-c:v', 'libx264',
+    '-crf', String(crf),
+    '-preset', 'fast',       // fast encode, good compression
+    '-c:a', 'aac',           // AAC audio
+    '-b:a', '128k',
+    '-movflags', '+faststart', // web-optimized MP4
+    '-y',                    // overwrite output
+    outName
+  );
 
-        // Add audio if supported
-        let audioCtx, destination;
-        try {
-          audioCtx = new AudioContext();
-          const source = audioCtx.createMediaElementSource(video);
-          destination = audioCtx.createMediaStreamDestination();
-          source.connect(destination);
-          source.connect(audioCtx.destination);
-          destination.stream.getAudioTracks().forEach(t => stream.addTrack(t));
-        } catch (_) { /* no audio, that's fine */ }
+  await ffmpeg.exec(args);
+  setProgress(entry, 95);
 
-        recorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: bitrate });
-      } catch (e) {
-        reject(new Error('MediaRecorder not supported for this format'));
-        return;
-      }
+  const data = await ffmpeg.readFile(outName);
+  const blob = new Blob([data.buffer], { type: 'video/mp4' });
 
-      const chunks = [];
-      recorder.ondataavailable = e => { if (e.data.size > 0) chunks.push(e.data); };
-      recorder.onstop = () => {
-        const blob = new Blob(chunks, { type: mimeType });
-        entry.blob = blob;
-        entry.compressedSize = blob.size;
-        entry.ext = 'webm';
-        URL.revokeObjectURL(url);
-        setProgress(entry, 100);
-        resolve();
-      };
-      recorder.onerror = e => reject(new Error('Recording error'));
+  // Cleanup FS
+  try { await ffmpeg.deleteFile(inName); } catch (_) {}
+  try { await ffmpeg.deleteFile(outName); } catch (_) {}
 
-      recorder.start(100);
-      video.play();
-
-      let startTime = null;
-      const duration = video.duration;
-
-      function drawFrame(ts) {
-        if (!startTime) startTime = ts;
-        if (video.ended || video.paused) {
-          ctx.drawImage(video, 0, 0, w, h);
-          recorder.stop();
-          return;
-        }
-        ctx.drawImage(video, 0, 0, w, h);
-        const pct = Math.min(90, 5 + ((video.currentTime / (duration || 1)) * 85));
-        setProgress(entry, pct);
-        requestAnimationFrame(drawFrame);
-      }
-
-      video.onplay = () => requestAnimationFrame(drawFrame);
-      video.onended = () => {
-        ctx.drawImage(video, 0, 0, w, h);
-        if (recorder.state !== 'inactive') recorder.stop();
-      };
-
-      setTimeout(() => {
-        if (recorder.state !== 'inactive') recorder.stop();
-      }, (duration + 5) * 1000);
-    };
-
-    video.onerror = () => reject(new Error('Video load failed'));
-  });
+  entry.blob = blob;
+  entry.compressedSize = blob.size;
+  entry.ext = 'mp4';
+  window._currentFFmpegEntry = null;
+  setProgress(entry, 100);
 }
 
 function setProgress(entry, val) {
   entry.progress = val;
   const el = document.getElementById(`prog-${entry.id}`);
   if (el) el.style.width = val + '%';
+  const lbl = document.getElementById(`prog-label-${entry.id}`);
+  if (lbl && val < 100) lbl.textContent = `encoding… ${Math.round(val)}%`;
 }
 
 // ── Summary ────────────────────────────────────────────────────────────
 function updateSummary() {
   const done = state.files.filter(f => f.status === 'done');
   if (done.length === 0) { summary.classList.remove('visible'); updateHeaderStat(0); return; }
-
   const origTotal = done.reduce((s, f) => s + f.originalSize, 0);
   const compTotal = done.reduce((s, f) => s + f.compressedSize, 0);
   const saved = origTotal - compTotal;
-
   document.getElementById('sumOriginal').textContent = fmtSize(origTotal);
   document.getElementById('sumCompressed').textContent = fmtSize(compTotal);
-  document.getElementById('sumSaved').textContent = `${Math.round((saved/origTotal)*100)}%`;
+  document.getElementById('sumSaved').textContent = `${Math.round((saved / origTotal) * 100)}%`;
   summary.classList.add('visible');
   updateHeaderStat(saved);
 }
@@ -1074,15 +1060,13 @@ function updateHeaderStat(bytes) {
 
 function checkDlAll() {
   const done = state.files.filter(f => f.status === 'done');
-  if (done.length > 1) dlAllBtn.classList.add('visible');
-  else dlAllBtn.classList.remove('visible');
+  done.length > 1 ? dlAllBtn.classList.add('visible') : dlAllBtn.classList.remove('visible');
 }
 
 dlAllBtn.addEventListener('click', () => {
   state.files.filter(f => f.status === 'done').forEach(f => downloadFile(f.id));
 });
 
-// ── Utils ──────────────────────────────────────────────────────────────
 function fmtSize(bytes) {
   if (!bytes && bytes !== 0) return '—';
   if (bytes < 1024) return bytes + ' B';
@@ -1090,19 +1074,7 @@ function fmtSize(bytes) {
   return (bytes / (1024 * 1024)).toFixed(2) + ' MB';
 }
 
-// Insert queue header once files are added
-let queueHeaderAdded = false;
-const origAddFiles = addFiles;
-// patch to add header
-(function() {
-  const _addFiles = window.addFiles;
-})();
-
-document.getElementById('dropZone').addEventListener('click', () => {
-  if (!queueHeaderAdded && state.files.length === 0) return;
-});
-
-// Add queue header when first file arrives
+// ── Queue header observer ──────────────────────────────────────────────
 const queueObserver = new MutationObserver(() => {
   if (queue.children.length > 0 && !document.getElementById('queueHeader')) {
     const hdr = document.createElement('div');
@@ -1114,18 +1086,14 @@ const queueObserver = new MutationObserver(() => {
     document.getElementById('clearBtn').addEventListener('click', () => {
       state.files = [];
       queue.innerHTML = '';
-      const hdr2 = document.getElementById('queueHeader');
-      if (hdr2) hdr2.remove();
+      document.getElementById('queueHeader')?.remove();
       summary.classList.remove('visible');
       dlAllBtn.classList.remove('visible');
       updateCompressBtn();
       updateHeaderStat(0);
     });
   }
-  if (queue.children.length === 0) {
-    const hdr2 = document.getElementById('queueHeader');
-    if (hdr2) hdr2.remove();
-  }
+  if (queue.children.length === 0) document.getElementById('queueHeader')?.remove();
 });
 queueObserver.observe(queue, { childList: true });
 </script>
