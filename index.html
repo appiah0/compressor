@@ -750,31 +750,27 @@ async function loadFFmpeg() {
   const spinner = document.getElementById('ffmpegSpinner');
   try {
     ffmpeg = new FFmpeg();
-    ffmpeg.on('log', ({ message }) => { /* console.log(message) */ });
     ffmpeg.on('progress', ({ progress }) => {
       if (window._currentFFmpegEntry) {
         setProgress(window._currentFFmpegEntry, Math.min(92, 5 + progress * 87));
       }
     });
 
-    const baseURL = 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd';
+    // Use toBlobURL for ALL scripts so they're same-origin and bypass CORS
+    const ffmpegBase = 'https://unpkg.com/@ffmpeg/ffmpeg@0.12.10/dist/umd';
+    const coreBase   = 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd';
+
     await ffmpeg.load({
-      coreURL: await toBlobURL(`${baseURL}/ffmpeg-core.js`, 'text/javascript'),
-      wasmURL: await toBlobURL(`${baseURL}/ffmpeg-core.wasm`, 'application/wasm'),
+      classWorkerURL: await toBlobURL(`${ffmpegBase}/ffmpeg.worker.js`, 'text/javascript'),
+      coreURL:        await toBlobURL(`${coreBase}/ffmpeg-core.js`,     'text/javascript'),
+      wasmURL:        await toBlobURL(`${coreBase}/ffmpeg-core.wasm`,   'application/wasm'),
     });
 
     ffmpegReady = true;
-    banner.classList.add('ready');
-    spinner.style.display = 'none';
-    banner.querySelector('.ffmpeg-icon') && (banner.querySelector('.ffmpeg-icon').textContent = '✅');
-    status.textContent = 'FFmpeg ready — MP4 (H.264) video compression enabled';
-
-    // Replace spinner with icon
     banner.innerHTML = `<span class="ffmpeg-icon">✅</span><span>FFmpeg ready — MP4 (H.264) video compression enabled</span>`;
     banner.classList.add('ready');
   } catch (err) {
     banner.classList.add('error');
-    spinner.style.display = 'none';
     banner.innerHTML = `<span class="ffmpeg-icon">⚠️</span><span>FFmpeg failed to load. Videos will still compress as WebM. (${err.message})</span>`;
   }
 }
