@@ -464,7 +464,13 @@ function checkDlAll() {
   state.files.filter(f=>f.status==='done').length > 1
     ? dlAllBtn.classList.add('visible') : dlAllBtn.classList.remove('visible');
 }
-dlAllBtn.addEventListener('click', () => state.files.filter(f=>f.status==='done').forEach(f=>dlFile(f.id)));
+dlAllBtn.addEventListener('click', async () => {
+  const done = state.files.filter(f => f.status === 'done');
+  for (const f of done) {
+    dlFile(f.id);
+    await new Promise(r => setTimeout(r, 400));
+  }
+});
 function fmtSize(b) {
   if (!b && b!==0) return '—';
   if (b<1024) return b+' B';
