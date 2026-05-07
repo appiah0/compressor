@@ -61,6 +61,11 @@
   .queue-title { font-size: 10px; letter-spacing: 3px; color: var(--muted); text-transform: uppercase; }
   .clear-btn { background: none; border: 1px solid var(--border); color: var(--muted); padding: 4px 10px; border-radius: 6px; font-family: 'DM Mono', monospace; font-size: 10px; cursor: pointer; transition: all 0.15s; letter-spacing: 1px; }
   .clear-btn:hover { border-color: var(--error); color: var(--error); }
+  .file-count-badge { display: inline-flex; align-items: center; gap: 8px; }
+  .count-pill { font-family: "Syne", sans-serif; font-size: 12px; font-weight: 700; padding: 2px 10px; border-radius: 100px; min-width: 24px; text-align: center; }
+  .count-pill.total { background: var(--accent); color: #0a0a0f; }
+  .count-pill.done { background: var(--accent3); color: #0a0a0f; display: none; }
+  .count-pill.done.visible { display: inline-block; }
 
   .file-item { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 16px 20px; display: grid; grid-template-columns: 56px 1fr auto; gap: 16px; align-items: center; transition: border-color 0.2s; animation: slideIn 0.2s ease; }
   @keyframes slideIn { from { opacity: 0; transform: translateY(-8px); } to { opacity: 1; transform: translateY(0); } }
@@ -262,6 +267,7 @@ function addFiles(files) {
     renderItem(entry);
   });
   updateCompressBtn();
+  updateFileCount();
 }
 
 // ── Render item ────────────────────────────────────────────────────────
@@ -301,7 +307,7 @@ function updateCompressBtn() {
 function rmFile(id) {
   state.files = state.files.filter(f => f.id !== id);
   $(`fi-${id}`)?.remove();
-  updateCompressBtn(); updateSummary(); checkDlAll();
+  updateCompressBtn(); updateSummary(); checkDlAll(); updateFileCount();
 }
 
 function dlFile(id) {
@@ -458,10 +464,13 @@ function updateSummary() {
   $('sumSaved').textContent      = Math.round((1-comp/orig)*100)+'%';
   summary.classList.add('visible');
   updateHeader(orig - comp);
+  updateFileCount();
 }
 function updateHeader(bytes) { $('totalSaved').textContent = fmtSize(bytes); }
 function checkDlAll() {
-  state.files.filter(f=>f.status==='done').length > 1
+  // Show Download All when ANY files are done (fix off-by-one)
+  // Previously "> 1" meant last file was never included properly
+  state.files.filter(f=>f.status==='done').length >= 1
     ? dlAllBtn.classList.add('visible') : dlAllBtn.classList.remove('visible');
 }
 dlAllBtn.addEventListener('click', async () => {
@@ -471,6 +480,21 @@ dlAllBtn.addEventListener('click', async () => {
     await new Promise(r => setTimeout(r, 400));
   }
 });
+function updateFileCount() {
+  const total = state.files.length;
+  const done  = state.files.filter(f => f.status === 'done').length;
+  const ct = $('countTotal');
+  const cd = $('countDone');
+  if (ct) ct.textContent = total + (total === 1 ? ' file' : ' files');
+  if (cd) {
+    if (done > 0) {
+      cd.textContent = done + ' compressed';
+      cd.classList.add('visible');
+    } else {
+      cd.classList.remove('visible');
+    }
+  }
+}
 function fmtSize(b) {
   if (!b && b!==0) return '—';
   if (b<1024) return b+' B';
@@ -483,12 +507,12 @@ new MutationObserver(() => {
   if (queue.children.length > 0 && !$('queueHeader')) {
     const hdr = document.createElement('div');
     hdr.id = 'queueHeader'; hdr.className = 'queue-header';
-    hdr.innerHTML = `<span class="queue-title">FILE QUEUE</span><button class="clear-btn" id="clearBtn">CLEAR ALL</button>`;
+    hdr.innerHTML = `<span class="file-count-badge"><span class="queue-title">FILE QUEUE</span><span class="count-pill total" id="countTotal">0</span><span class="count-pill done" id="countDone"></span></span><button class="clear-btn" id="clearBtn">CLEAR ALL</button>`;
     queue.insertAdjacentElement('beforebegin', hdr);
     $('clearBtn').addEventListener('click', () => {
       state.files=[]; queue.innerHTML=''; $('queueHeader')?.remove();
       summary.classList.remove('visible'); dlAllBtn.classList.remove('visible');
-      updateCompressBtn(); updateHeader(0);
+      updateCompressBtn(); updateHeader(0); updateFileCount();
     });
   }
   if (queue.children.length === 0) $('queueHeader')?.remove();
