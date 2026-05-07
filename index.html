@@ -185,6 +185,15 @@
         <button class="btn-opt" data-val="480">480p</button>
       </div>
     </div>
+    <div class="setting-card full">
+      <div class="setting-label"><span class="dot" style="background:var(--accent3)"></span>Compression Speed</div>
+      <div class="btn-group" id="speedMode">
+        <button class="btn-opt" data-val="quality">🏆 BEST QUALITY</button>
+        <button class="btn-opt active" data-val="balanced">⚡ BALANCED</button>
+        <button class="btn-opt" data-val="fast">🚀 FASTEST</button>
+      </div>
+      <div style="margin-top:10px;font-size:10px;color:var(--muted);letter-spacing:0.5px" id="speedNote">Balanced: good quality, reasonable speed</div>
+    </div>
   </div>
 
   <div class="summary" id="summary">
@@ -214,7 +223,8 @@ async function loadFFmpeg() {
   try {
     ffmpeg = createFFmpeg({
       log: false,
-      corePath: 'https://unpkg.com/@ffmpeg/core@0.11.0/dist/ffmpeg-core.js',
+      // core-mt = multi-threaded FFmpeg — uses all CPU cores via SharedArrayBuffer
+      corePath: 'https://unpkg.com/@ffmpeg/core-mt@0.11.0/dist/ffmpeg-core.js',
       progress: ({ ratio }) => {
         if (window._ffEntry) setProgress(window._ffEntry, Math.min(92, 5 + ratio * 87));
       },
@@ -233,7 +243,7 @@ loadFFmpeg();
 // ── State ──────────────────────────────────────────────────────────────
 const state = {
   files: [], nextId: 1,
-  settings: { imgQuality: 80, imgFormat: 'webp', maxDim: 0, vidQuality: 28, vidRes: 'original' }
+  settings: { imgQuality: 80, imgFormat: 'webp', maxDim: 0, vidQuality: 28, vidRes: 'original', speedMode: 'balanced' }
 };
 const $ = id => document.getElementById(id);
 const dropZone    = $('dropZone');
@@ -264,6 +274,18 @@ document.getElementById('imgFormat').querySelectorAll('.btn-opt').forEach(btn =>
 });
 wireGroup('maxDim', 'maxDim');
 wireGroup('vidRes', 'vidRes');
+wireGroup('speedMode', 'speedMode');
+const speedNotes = {
+  quality:  '🏆 Best Quality: slowest encode, smallest file size',
+  balanced: '⚡ Balanced: good quality, reasonable speed',
+  fast:     '🚀 Fastest: quickest encode, slightly larger file'
+};
+document.getElementById('speedMode').querySelectorAll('.btn-opt').forEach(btn => {
+  btn.addEventListener('click', () => {
+    const note = document.getElementById('speedNote');
+    if (note) note.textContent = speedNotes[btn.dataset.val] || '';
+  });
+});
 
 // ── Drop zone ──────────────────────────────────────────────────────────
 dropZone.addEventListener('click', () => fileInput.click());
@@ -341,20 +363,45 @@ function dlFile(id) {
 // ── Compress all ───────────────────────────────────────────────────────
 compressBtn.addEventListener('click', async () => {
   compressBtn.disabled = true;
-  startKeepAlive(); // prevent sleep during compression
-  for (const entry of state.files.filter(f => f.status === 'pending' || f.status === 'error')) {
-    entry.status = 'processing'; entry.progress = 5;
-    renderItem(entry);
+  startKeepAlive();
+
+  const pending = state.files.filter(f => f.status === 'pending' || f.status === 'error');
+  const images  = pending.filter(f => f.type === 'image');
+  const videos  = pending.filter(f => f.type === 'video');
+
+  // Mark all as processing immediately
+  pending.forEach(entry => { entry.status = 'processing'; entry.progress = 5; renderItem(entry); });
+
+  // Images: run ALL in parallel (Canvas API is non-blocking)
+  const imgPromises = images.map(async entry => {
     try {
-      await (entry.type === 'image' ? compressImage(entry) : compressVideo(entry));
+      await compressImage(entry);
       entry.status = 'done';
-    } catch (err) {
+    } catch(err) {
       entry.status = 'error';
-      entry.errorMsg = err.message || 'Compression failed';
+      entry.errorMsg = err.message || 'Failed';
     }
-    renderItem(entry); updateSummary(); checkDlAll();
-  }
-  stopKeepAlive(); // release wake lock when done
+    renderItem(entry); updateSummary(); checkDlAll(); updateFileCount();
+  });
+
+  // Videos: must run sequentially (FFmpeg is single-instance)
+  const runVideos = async () => {
+    for (const entry of videos) {
+      try {
+        await compressVideo(entry);
+        entry.status = 'done';
+      } catch(err) {
+        entry.status = 'error';
+        entry.errorMsg = err.message || 'Failed';
+      }
+      renderItem(entry); updateSummary(); checkDlAll(); updateFileCount();
+    }
+  };
+
+  // Run images in parallel, videos sequentially — both start at same time
+  await Promise.all([Promise.all(imgPromises), runVideos()]);
+
+  stopKeepAlive();
   updateCompressBtn();
 });
 
@@ -422,7 +469,12 @@ async function compressVideoFFmpeg(entry) {
 
   const args = ['-i', inName];
   if (state.settings.vidRes !== 'original') args.push('-vf', `scale=-2:${state.settings.vidRes}`);
-  args.push('-c:v','libx264','-crf',String(state.settings.vidQuality),'-preset','fast',
+  // Map speed mode to FFmpeg preset and tune
+  const presetMap = { quality: 'slow', balanced: 'fast', fast: 'ultrafast' };
+  const preset = presetMap[state.settings.speedMode] || 'fast';
+  // ultrafast also benefits from -tune fastdecode
+  const tuneArgs = state.settings.speedMode === 'fast' ? ['-tune', 'fastdecode'] : [];
+  args.push('-c:v','libx264','-crf',String(state.settings.vidQuality),'-preset', preset, ...tuneArgs,
             '-c:a','aac','-b:a','128k','-movflags','+faststart','-y', outName);
 
   await ffmpeg.run(...args);
