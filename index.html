@@ -6,7 +6,7 @@
 <title>COMPRESS — Advanced Media Optimizer</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;700;800&family=DM+Mono:wght@300;400;500&display=swap" rel="stylesheet">
-<script src="https://unpkg.com/@ffmpeg/ffmpeg@0.12.10/dist/umd/ffmpeg.js"></script>
+<script src="/ffmpeg/ffmpeg.js"></script>
 <script src="https://unpkg.com/@ffmpeg/util@0.12.1/dist/umd/index.js"></script>
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -756,14 +756,10 @@ async function loadFFmpeg() {
       }
     });
 
-    // Use toBlobURL for ALL scripts so they're same-origin and bypass CORS
-    const ffmpegBase = 'https://unpkg.com/@ffmpeg/ffmpeg@0.12.10/dist/umd';
-    const coreBase   = 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd';
-
     await ffmpeg.load({
-      classWorkerURL: await toBlobURL(`${ffmpegBase}/ffmpeg.worker.js`, 'text/javascript'),
-      coreURL:        await toBlobURL(`${coreBase}/ffmpeg-core.js`,     'text/javascript'),
-      wasmURL:        await toBlobURL(`${coreBase}/ffmpeg-core.wasm`,   'application/wasm'),
+      classWorkerURL: await toBlobURL('/ffmpeg/ffmpeg.worker.js', 'text/javascript'),
+      coreURL:        await toBlobURL('/ffmpeg/ffmpeg-core.js',   'text/javascript'),
+      wasmURL:        'https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd/ffmpeg-core.wasm',
     });
 
     ffmpegReady = true;
