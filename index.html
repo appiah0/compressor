@@ -7,6 +7,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;700;800&family=DM+Mono:wght@300;400;500&display=swap" rel="stylesheet">
 <script src="https://unpkg.com/@ffmpeg/ffmpeg@0.11.6/dist/ffmpeg.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
   :root {
@@ -154,8 +155,9 @@
       <div class="btn-group" id="imgFormat">
         <button class="btn-opt active" data-val="webp">WEBP</button>
         <button class="btn-opt" data-val="jpeg">JPEG</button>
-        <button class="btn-opt" data-val="png">PNG</button>
+        <button class="btn-opt" data-val="png" title="PNG is lossless — size may increase">PNG ⚠</button>
       </div>
+      <div id="pngWarn" style="display:none;margin-top:10px;font-size:10px;color:var(--accent2);letter-spacing:0.5px">⚠ PNG is lossless — output may be larger than original. Use WEBP for best compression.</div>
     </div>
     <div class="setting-card">
       <div class="setting-label"><span class="dot" style="background:var(--accent2)"></span>Max Dimension (px)</div>
@@ -245,6 +247,13 @@ function wireGroup(id, key) {
   }));
 }
 wireGroup('imgFormat', 'imgFormat');
+// Show PNG warning when PNG is selected
+document.getElementById('imgFormat').querySelectorAll('.btn-opt').forEach(btn => {
+  btn.addEventListener('click', () => {
+    const warn = document.getElementById('pngWarn');
+    if (warn) warn.style.display = btn.dataset.val === 'png' ? 'block' : 'none';
+  });
+});
 wireGroup('maxDim', 'maxDim');
 wireGroup('vidRes', 'vidRes');
 
@@ -277,7 +286,9 @@ function renderItem(entry) {
   const meta   =
     entry.status === 'pending'    ? `<span>${fmtSize(entry.originalSize)}</span><span>ready</span>` :
     entry.status === 'processing' ? `<span>${fmtSize(entry.originalSize)}</span><span id="plbl-${entry.id}">encoding…</span>` :
-    entry.status === 'done'       ? `<span>${fmtSize(entry.originalSize)}</span><span>→</span><span>${fmtSize(entry.compressedSize)}</span><span class="saving">−${pct}%</span>` :
+    entry.status === 'done'       ? (entry.sizeIncreased
+      ? `<span>${fmtSize(entry.originalSize)}</span><span>→</span><span style="color:var(--accent2)">${fmtSize(entry.compressedSize)}</span><span style="color:var(--accent2);font-size:10px">⚠ PNG larger than original</span>`
+      : `<span>${fmtSize(entry.originalSize)}</span><span>→</span><span>${fmtSize(entry.compressedSize)}</span><span class="saving">−${pct}%</span>`) :
                                     `<span class="error-msg">${entry.errorMsg || 'Failed'}</span>`;
   const acts   = entry.status === 'done'
     ? `<button class="dl-btn" onclick="dlFile(${entry.id})">↓ SAVE</button><button class="remove-btn" onclick="rmFile(${entry.id})">✕</button>`
@@ -358,8 +369,19 @@ function compressImage(entry) {
         const qual = fmt === 'png' ? undefined : state.settings.imgQuality / 100;
         canvas.toBlob(blob => {
           if (!blob) return reject(new Error('Compression failed'));
-          entry.blob = blob; entry.compressedSize = blob.size;
-          entry.ext = exts[fmt] || 'webp';
+          // PNG is lossless — if it ends up larger than original, keep original blob
+          if (fmt === 'png' && blob.size >= entry.originalSize) {
+            // Re-encode as PNG from original for accuracy but flag it
+            entry.blob = blob;
+            entry.compressedSize = blob.size;
+            entry.ext = 'png';
+            entry.sizeIncreased = true;
+          } else {
+            entry.blob = blob;
+            entry.compressedSize = blob.size;
+            entry.ext = exts[fmt] || 'webp';
+            entry.sizeIncreased = false;
+          }
           setProgress(entry, 100); resolve();
         }, fmts[fmt] || 'image/webp', qual);
       } catch(e) { reject(e); }
@@ -475,10 +497,35 @@ function checkDlAll() {
 }
 dlAllBtn.addEventListener('click', async () => {
   const done = state.files.filter(f => f.status === 'done');
-  for (const f of done) {
-    dlFile(f.id);
-    await new Promise(r => setTimeout(r, 400));
+  if (!done.length) return;
+
+  // Single file — just download directly
+  if (done.length === 1) { dlFile(done[0].id); return; }
+
+  // Multiple files — zip them all into one download
+  dlAllBtn.textContent = '⏳ ZIPPING…';
+  dlAllBtn.style.opacity = '0.6';
+  dlAllBtn.style.pointerEvents = 'none';
+
+  try {
+    const zip = new JSZip();
+    done.forEach(f => {
+      const name = f.file.name.replace(/\.[^.]+$/, '') + '_compressed.' + f.ext;
+      zip.file(name, f.blob);
+    });
+    const zipBlob = await zip.generateAsync({ type: 'blob', compression: 'STORE' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(zipBlob);
+    a.download = 'compressed_files.zip';
+    a.click();
+    URL.revokeObjectURL(a.href);
+  } catch(err) {
+    alert('Zip failed: ' + err.message);
   }
+
+  dlAllBtn.textContent = '↓ DOWNLOAD ALL';
+  dlAllBtn.style.opacity = '';
+  dlAllBtn.style.pointerEvents = '';
 });
 function updateFileCount() {
   const total = state.files.length;
