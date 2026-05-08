@@ -14,7 +14,6 @@
 <link rel="apple-touch-icon" href="/icon-192.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;700;800&family=DM+Mono:wght@300;400;500&display=swap" rel="stylesheet">
-<script src="https://unpkg.com/@ffmpeg/ffmpeg@0.11.6/dist/ffmpeg.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -127,9 +126,9 @@
     <div class="header-stats"><strong id="totalSaved">0 MB</strong>TOTAL SAVED</div>
   </header>
 
-  <div class="ffmpeg-banner" id="ffmpegBanner">
-    <div class="ffmpeg-spinner"></div>
-    <span id="ffmpegStatus">Loading FFmpeg engine for MP4 compression…</span>
+  <div class="ffmpeg-banner ready" id="ffmpegBanner">
+    <span style="font-size:16px">✅</span>
+    <span>Video compression ready — outputs compressed WebM (VP9)</span>
   </div>
 
   <div class="drop-zone" id="dropZone">
@@ -211,55 +210,9 @@
 
 </div>
 <script>
-// ── FFmpeg v0.11 ───────────────────────────────────────────────────────
-// v0.11 is a single script tag, no workers, no SharedArrayBuffer,
-// no extra files to host — loads core WASM directly from CDN.
-const { createFFmpeg, fetchFile } = FFmpeg;
-let ffmpeg = null;
-let ffmpegReady = false;
-
-async function loadFFmpeg() {
-  const banner = document.getElementById('ffmpegBanner');
-
-  // Try multiple CDN sources in order — first one that works wins
-  const coreSources = [
-    'https://unpkg.com/@ffmpeg/core@0.11.0/dist/ffmpeg-core.js',
-    'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.11.0/dist/ffmpeg-core.js',
-    'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.11.0/dist/ffmpeg-core.js',
-  ];
-
-  for (let i = 0; i < coreSources.length; i++) {
-    const src = coreSources[i];
-    try {
-      banner.innerHTML = `<div class="ffmpeg-spinner"></div><span>Loading FFmpeg${i > 0 ? ' (retry ' + i + ')' : ''}…</span>`;
-      banner.className = 'ffmpeg-banner';
-
-      ffmpeg = createFFmpeg({
-        log: false,
-        corePath: src,
-        progress: ({ ratio }) => {
-          if (window._ffEntry) setProgress(window._ffEntry, Math.min(92, 5 + ratio * 87));
-        },
-      });
-
-      await ffmpeg.load();
-      ffmpegReady = true;
-      banner.innerHTML = `<span style="font-size:16px">✅</span><span>FFmpeg ready — MP4 (H.264) output enabled</span>`;
-      banner.classList.add('ready');
-      return; // success — stop trying
-    } catch (err) {
-      console.warn('FFmpeg load failed from', src, err.message);
-      ffmpeg = null;
-      // small delay before retry
-      await new Promise(r => setTimeout(r, 1000));
-    }
-  }
-
-  // All sources failed
-  banner.classList.add('error');
-  banner.innerHTML = `<span style="font-size:16px">⚠️</span><span>FFmpeg failed to load — videos will compress as WebM instead</span>`;
-}
-loadFFmpeg();
+// ── Video codec detection ─────────────────────────────────────────────
+// Uses browser-native MediaRecorder — no external dependencies needed.
+// Picks best available codec: VP9 > VP8 (both compress well)
 
 // ── State ──────────────────────────────────────────────────────────────
 const state = {
@@ -471,84 +424,108 @@ function compressImage(entry) {
 
 // ── Video (FFmpeg v0.11 → MP4, with WebM fallback) ─────────────────────
 async function compressVideo(entry) {
-  if (ffmpegReady && ffmpeg) {
-    return compressVideoFFmpeg(entry);
-  }
-  return compressVideoWebM(entry);
-}
-
-async function compressVideoFFmpeg(entry) {
-  window._ffEntry = entry;
-  setProgress(entry, 5);
-
-  const ext     = (entry.file.name.split('.').pop() || 'mp4').toLowerCase();
-  const inName  = `i${entry.id}.${ext}`;
-  const outName = `o${entry.id}.mp4`;
-
-  ffmpeg.FS('writeFile', inName, await fetchFile(entry.file));
-  setProgress(entry, 10);
-
-  const args = ['-i', inName];
-  if (state.settings.vidRes !== 'original') args.push('-vf', `scale=-2:${state.settings.vidRes}`);
-  // Map speed mode to FFmpeg preset and tune
-  const presetMap = { quality: 'slow', balanced: 'fast', fast: 'ultrafast' };
-  const preset = presetMap[state.settings.speedMode] || 'fast';
-  // ultrafast also benefits from -tune fastdecode
-  const tuneArgs = state.settings.speedMode === 'fast' ? ['-tune', 'fastdecode'] : [];
-  args.push('-c:v','libx264','-crf',String(state.settings.vidQuality),'-preset', preset, ...tuneArgs,
-            '-c:a','aac','-b:a','128k','-movflags','+faststart','-y', outName);
-
-  await ffmpeg.run(...args);
-  setProgress(entry, 95);
-
-  const data = ffmpeg.FS('readFile', outName);
-  entry.blob = new Blob([data.buffer], { type: 'video/mp4' });
-  entry.compressedSize = entry.blob.size;
-  entry.ext = 'mp4';
-
-  try { ffmpeg.FS('unlink', inName); } catch(_) {}
-  try { ffmpeg.FS('unlink', outName); } catch(_) {}
-  window._ffEntry = null;
-  setProgress(entry, 100);
-}
-
-function compressVideoWebM(entry) {
   return new Promise((resolve, reject) => {
     const video = document.createElement('video');
-    video.muted = true; video.playsInline = true;
+    video.muted = true;
+    video.playsInline = true;
     video.src = URL.createObjectURL(entry.file);
+
     video.onloadedmetadata = () => {
-      let w = video.videoWidth, h = video.videoHeight;
+      // ── Target dimensions ────────────────────────────────────────
+      let w = video.videoWidth  || 1280;
+      let h = video.videoHeight || 720;
       const res = state.settings.vidRes;
-      if (res !== 'original' && +res < h) { const r = +res/h; w=Math.round(w*r); h=+res; }
-      w = w%2===0?w:w-1; h = h%2===0?h:h-1;
+      if (res !== 'original' && h > +res) {
+        const r = +res / h; w = Math.round(w * r); h = +res;
+      }
+      w = w % 2 === 0 ? w : w - 1;
+      h = h % 2 === 0 ? h : h - 1;
+
+      // ── Canvas ───────────────────────────────────────────────────
       const canvas = document.createElement('canvas');
-      canvas.width=w; canvas.height=h;
+      canvas.width = w; canvas.height = h;
       const ctx = canvas.getContext('2d');
-      const t = (state.settings.vidQuality-18)/(51-18);
-      const bitrate = Math.round(8e6 * Math.pow(2e5/8e6, t));
-      const mime = ['video/webm;codecs=vp9','video/webm;codecs=vp8','video/webm'].find(m=>MediaRecorder.isTypeSupported(m))||'video/webm';
-      const stream = canvas.captureStream(30);
-      const rec = new MediaRecorder(stream, { mimeType:mime, videoBitsPerSecond:bitrate });
+
+      // ── Bitrate from quality slider ───────────────────────────────
+      // Quality 18 (best) → 8Mbps, Quality 51 (smallest) → 150kbps
+      const crf = state.settings.vidQuality;
+      const t = (crf - 18) / (51 - 18);
+      const bitsPerSecond = Math.round(8_000_000 * Math.pow(150_000 / 8_000_000, t));
+
+      // ── FPS from speed mode ───────────────────────────────────────
+      const fpsMap = { quality: 30, balanced: 24, fast: 20 };
+      const fps = fpsMap[state.settings.speedMode] || 24;
+
+      // ── Best available codec ──────────────────────────────────────
+      const mimes = [
+        'video/webm;codecs=vp9,opus',
+        'video/webm;codecs=vp9',
+        'video/webm;codecs=vp8,opus',
+        'video/webm;codecs=vp8',
+        'video/webm',
+      ];
+      const mimeType = mimes.find(m => MediaRecorder.isTypeSupported(m)) || 'video/webm';
+
+      // ── Stream + Recorder ─────────────────────────────────────────
+      const stream = canvas.captureStream(fps);
+
+      // Capture audio
+      try {
+        const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        const src = audioCtx.createMediaElementSource(video);
+        const dst = audioCtx.createMediaStreamDestination();
+        src.connect(dst); src.connect(audioCtx.destination);
+        dst.stream.getAudioTracks().forEach(t => stream.addTrack(t));
+      } catch(_) {}
+
+      let rec;
+      try {
+        rec = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: bitsPerSecond });
+      } catch(_) {
+        rec = new MediaRecorder(stream, { videoBitsPerSecond: bitsPerSecond });
+      }
+
       const chunks = [];
-      rec.ondataavailable = e => { if(e.data.size>0) chunks.push(e.data); };
+      rec.ondataavailable = e => { if (e.data && e.data.size > 0) chunks.push(e.data); };
       rec.onstop = () => {
-        entry.blob = new Blob(chunks, { type:mime });
-        entry.compressedSize = entry.blob.size; entry.ext = 'webm';
-        setProgress(entry, 100); resolve();
+        const blob = new Blob(chunks, { type: rec.mimeType || mimeType });
+        entry.blob = blob;
+        entry.compressedSize = blob.size;
+        entry.ext = 'webm';
+        URL.revokeObjectURL(video.src);
+        setProgress(entry, 100);
+        resolve();
       };
-      rec.start(100); video.play();
-      const dur = video.duration;
-      (function draw() {
-        if (video.ended||video.paused) { ctx.drawImage(video,0,0,w,h); if(rec.state!=='inactive') rec.stop(); return; }
-        ctx.drawImage(video,0,0,w,h);
-        setProgress(entry, Math.min(90, 5+(video.currentTime/(dur||1))*85));
-        requestAnimationFrame(draw);
-      })();
-      video.onended = () => { if(rec.state!=='inactive') rec.stop(); };
-      setTimeout(() => { if(rec.state!=='inactive') rec.stop(); }, (dur+10)*1000);
+      rec.onerror = () => reject(new Error('Recorder error'));
+
+      // ── Draw loop ─────────────────────────────────────────────────
+      rec.start(500);
+      video.play().catch(reject);
+
+      const dur = video.duration || 0;
+      let rafId;
+      function draw() {
+        if (video.paused || video.ended) {
+          ctx.drawImage(video, 0, 0, w, h);
+          if (rec.state !== 'inactive') rec.stop();
+          return;
+        }
+        ctx.drawImage(video, 0, 0, w, h);
+        setProgress(entry, Math.min(92, 5 + (dur > 0 ? (video.currentTime / dur) * 87 : 40)));
+        rafId = requestAnimationFrame(draw);
+      }
+      video.onplay   = () => { rafId = requestAnimationFrame(draw); };
+      video.onended  = () => { cancelAnimationFrame(rafId); ctx.drawImage(video,0,0,w,h); if(rec.state!=='inactive') rec.stop(); };
+      video.onerror  = () => reject(new Error('Video playback error'));
+
+      // Safety timeout
+      setTimeout(() => {
+        cancelAnimationFrame(rafId);
+        if (rec.state !== 'inactive') rec.stop();
+      }, Math.max(60000, (dur + 20) * 1000));
     };
-    video.onerror = () => reject(new Error('Video load failed'));
+
+    video.onerror = () => reject(new Error('Could not load video'));
   });
 }
 
