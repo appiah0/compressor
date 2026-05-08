@@ -189,9 +189,9 @@
       <div class="btn-group" id="speedMode">
         <button class="btn-opt" data-val="quality">🏆 BEST QUALITY</button>
         <button class="btn-opt active" data-val="balanced">⚡ BALANCED</button>
-        <button class="btn-opt" data-val="fast">🚀 FASTEST</button>
+        <button class="btn-opt" data-val="fast">🚀 FASTEST (Firefox/Edge)</button>
       </div>
-      <div style="margin-top:10px;font-size:10px;color:var(--muted);letter-spacing:0.5px" id="speedNote">Balanced: good quality, reasonable speed</div>
+      <div style="margin-top:10px;font-size:10px;color:var(--muted);letter-spacing:0.5px" id="speedNote">⚡ Balanced: safe on all browsers, good quality</div>
     </div>
   </div>
 
@@ -250,9 +250,9 @@ wireGroup('maxDim', 'maxDim');
 wireGroup('vidRes', 'vidRes');
 wireGroup('speedMode', 'speedMode');
 const speedNotes = {
-  quality:  '🏆 Best Quality: slowest encode, smallest file size',
-  balanced: '⚡ Balanced: good quality, reasonable speed',
-  fast:     '🚀 Fastest: quickest encode, slightly larger file'
+  quality:  '🏆 Best Quality: frame-by-frame, safest on Chrome — slowest',
+  balanced: '⚡ Balanced: frame-by-frame, safe on all browsers — recommended',
+  fast:     '🚀 Fastest: real-time playback — best on Firefox & Edge. May crash Chrome on large videos'
 };
 document.getElementById('speedMode').querySelectorAll('.btn-opt').forEach(btn => {
   btn.addEventListener('click', () => {
@@ -424,190 +424,192 @@ function compressImage(entry) {
 
 // ── Video (FFmpeg v0.11 → MP4, with WebM fallback) ─────────────────────
 async function compressVideo(entry) {
+  // Chrome on Android crashes with real-time playback on large files.
+  // Firefox/Edge handle it fine. Let the user pick via Speed Mode:
+  // "Fastest" = real-time (fast, may crash Chrome on big files)
+  // "Balanced" / "Best Quality" = frame-seek (safe on all browsers)
+  const useRealtime = state.settings.speedMode === 'fast';
+  return useRealtime ? compressVideoRealtime(entry) : compressVideoSeeked(entry);
+}
+
+// ── FAST: Real-time playback (Firefox/Edge — great performance) ────────
+function compressVideoRealtime(entry) {
   return new Promise((resolve, reject) => {
     const video = document.createElement('video');
-    video.muted = true;
-    video.playsInline = true;
+    video.muted = true; video.playsInline = true;
     video.setAttribute('playsinline', '');
-    video.preload = 'auto';
     const objUrl = URL.createObjectURL(entry.file);
     video.src = objUrl;
 
-    video.onloadedmetadata = async () => {
-      const dur = video.duration || 0;
-
-      // ── Dimensions ───────────────────────────────────────────────
-      let w = video.videoWidth  || 1280;
-      let h = video.videoHeight || 720;
+    video.onloadedmetadata = () => {
+      let w = video.videoWidth || 1280, h = video.videoHeight || 720;
       const res = state.settings.vidRes;
-      if (res !== 'original' && h > +res) {
-        const r = +res / h;
-        w = Math.round(w * r);
-        h = +res;
-      }
-      // Clamp to max 1280px wide to prevent memory blowout on huge videos
-      if (w > 1280) { const r = 1280 / w; w = 1280; h = Math.round(h * r); }
-      w = w % 2 === 0 ? w : w - 1;
-      h = h % 2 === 0 ? h : h - 1;
+      if (res !== 'original' && h > +res) { const r = +res/h; w=Math.round(w*r); h=+res; }
+      w = w%2===0?w:w-1; h = h%2===0?h:h-1;
 
-      // ── FPS — lower = less memory pressure ───────────────────────
-      const fpsMap = { quality: 24, balanced: 20, fast: 15 };
-      const fps    = fpsMap[state.settings.speedMode] || 20;
-      const frameMs = 1000 / fps; // ms per frame
-
-      // ── Bitrate ──────────────────────────────────────────────────
-      const crf = state.settings.vidQuality;
-      const t   = (crf - 18) / (51 - 18);
-      const bitsPerSecond = Math.round(6_000_000 * Math.pow(100_000 / 6_000_000, t));
-
-      // ── Canvas (no alpha = less memory) ──────────────────────────
       const canvas = document.createElement('canvas');
-      canvas.width  = w;
-      canvas.height = h;
-      const ctx = canvas.getContext('2d', { alpha: false, willReadFrequently: false });
+      canvas.width=w; canvas.height=h;
+      const ctx = canvas.getContext('2d', { alpha: false });
 
-      // ── Codec ────────────────────────────────────────────────────
-      const mimes = [
-        'video/webm;codecs=vp8',  // VP8 uses MUCH less memory than VP9
-        'video/webm;codecs=vp8,opus',
-        'video/webm',
-      ];
+      const crf = state.settings.vidQuality;
+      const t = (crf-18)/(51-18);
+      const bitsPerSecond = Math.round(8_000_000 * Math.pow(150_000/8_000_000, t));
+      const fps = 30;
+
+      const mimes = ['video/webm;codecs=vp9,opus','video/webm;codecs=vp9','video/webm;codecs=vp8,opus','video/webm;codecs=vp8','video/webm'];
       const mimeType = mimes.find(m => MediaRecorder.isTypeSupported(m)) || 'video/webm';
 
-      // ── Stream + Recorder ─────────────────────────────────────────
       const stream = canvas.captureStream(fps);
-
-      // Audio
-      let audioCtx;
       try {
-        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
         const src = audioCtx.createMediaElementSource(video);
         const dst = audioCtx.createMediaStreamDestination();
-        src.connect(dst);
-        src.connect(audioCtx.destination);
+        src.connect(dst); src.connect(audioCtx.destination);
         dst.stream.getAudioTracks().forEach(tk => stream.addTrack(tk));
       } catch(_) {}
 
       let rec;
-      try {
-        rec = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: bitsPerSecond });
-      } catch(_) {
-        rec = new MediaRecorder(stream, { videoBitsPerSecond: bitsPerSecond });
-      }
+      try { rec = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: bitsPerSecond }); }
+      catch(_) { rec = new MediaRecorder(stream, { videoBitsPerSecond: bitsPerSecond }); }
 
-      // Collect chunks but limit memory — don't keep all in RAM
       const chunks = [];
-      let totalChunkSize = 0;
-      rec.ondataavailable = e => {
-        if (e.data && e.data.size > 0) {
-          chunks.push(e.data);
-          totalChunkSize += e.data.size;
-        }
-      };
-
+      rec.ondataavailable = e => { if (e.data?.size > 0) chunks.push(e.data); };
       rec.onstop = () => {
-        try {
-          const blob = new Blob(chunks, { type: rec.mimeType || mimeType });
-          entry.blob = blob;
-          entry.compressedSize = blob.size;
-          entry.ext = 'webm';
-        } catch(e) {
-          reject(new Error('Failed to build output: ' + e.message));
-          return;
-        }
-        // Cleanup
-        chunks.length = 0;
+        entry.blob = new Blob(chunks, { type: rec.mimeType || mimeType });
+        entry.compressedSize = entry.blob.size; entry.ext = 'webm';
         URL.revokeObjectURL(objUrl);
-        clearInterval(drawTimer);
-        clearTimeout(safetyTimer);
-        if (audioCtx) try { audioCtx.close(); } catch(_) {}
-        setProgress(entry, 100);
-        resolve();
+        clearInterval(drawTimer); clearTimeout(safetyTimer);
+        setProgress(entry, 100); resolve();
       };
+      rec.onerror = () => reject(new Error('Recorder error'));
 
-      rec.onerror = () => {
-        clearInterval(drawTimer);
-        reject(new Error('Recorder error — try a shorter or smaller video'));
-      };
+      const dur = video.duration || 0;
+      let drawTimer = null, safetyTimer = null, stopped = false;
 
-      // ── Frame-by-frame seek mode (memory-safe) ────────────────────
-      // Instead of playing video in real-time (which buffers everything
-      // into RAM), we seek frame by frame. This uses a fraction of the
-      // memory because the browser only decodes one frame at a time.
-      let currentTime = 0;
-      let drawTimer   = null;
-      let safetyTimer = null;
-      let stopped     = false;
-
-      function cleanup() {
-        stopped = true;
-        clearInterval(drawTimer);
-        clearTimeout(safetyTimer);
-      }
-
-      function drawNextFrame() {
-        if (stopped) return;
-
-        if (currentTime > dur) {
-          // All frames drawn — stop recording
-          cleanup();
-          if (rec.state !== 'inactive') rec.stop();
-          return;
-        }
-
-        // Seek video to next frame time
-        video.currentTime = currentTime;
-      }
-
-      // Fires each time seek completes — draw that frame then advance
-      video.onseeked = () => {
-        if (stopped) return;
-        try {
-          ctx.drawImage(video, 0, 0, w, h);
-        } catch(_) {}
-
-        const pct = dur > 0 ? Math.min(92, 5 + (currentTime / dur) * 87) : 50;
-        setProgress(entry, pct);
-
-        currentTime += frameMs / 1000; // advance by one frame duration
-      };
-
-      // Use setInterval to pace the seeks — prevents flooding the decoder
-      // 20ms extra buffer per frame avoids "seek storm" memory spikes
-      function startSeeking() {
+      function startDrawing() {
         if (drawTimer) return;
         drawTimer = setInterval(() => {
           if (stopped) { clearInterval(drawTimer); return; }
-          drawNextFrame();
-        }, frameMs + 20);
+          if (video.ended || video.paused) {
+            try { ctx.drawImage(video,0,0,w,h); } catch(_) {}
+            stopped = true; clearInterval(drawTimer);
+            if (rec.state !== 'inactive') rec.stop();
+            return;
+          }
+          try { ctx.drawImage(video,0,0,w,h); } catch(_) {}
+          setProgress(entry, Math.min(92, 5+(dur>0?(video.currentTime/dur)*87:40)));
+        }, 1000/fps);
       }
 
-      // Resume if tab becomes visible again
       document.addEventListener('visibilitychange', function onVis() {
-        if (document.visibilityState === 'visible' && !stopped) {
-          if (!drawTimer) startSeeking();
+        if (document.visibilityState==='visible' && !stopped) {
+          if (video.paused && !video.ended) video.play().catch(()=>{});
+          if (!drawTimer) startDrawing();
         }
         if (stopped) document.removeEventListener('visibilitychange', onVis);
       });
 
-      // Safety timeout — force stop if stuck
-      const maxMs = Math.max(300_000, dur * (fps + 5) * 100);
-      safetyTimer = setTimeout(() => {
-        cleanup();
-        if (rec.state !== 'inactive') rec.stop();
-      }, maxMs);
-
-      // ── Start ─────────────────────────────────────────────────────
-      rec.start(2000); // flush chunk every 2s — avoids giant RAM buffer
-      setProgress(entry, 5);
-
-      // Seek to first frame to initialise
-      video.currentTime = 0;
-      // Wait a tick then begin interval
-      setTimeout(() => startSeeking(), 100);
+      rec.start(1000);
+      video.play().then(()=>startDrawing()).catch(reject);
+      video.onended = () => { stopped=true; clearInterval(drawTimer); try{ctx.drawImage(video,0,0,w,h);}catch(_){} if(rec.state!=='inactive') rec.stop(); };
+      safetyTimer = setTimeout(() => { stopped=true; clearInterval(drawTimer); if(rec.state!=='inactive') rec.stop(); }, Math.max(120000,(dur+30)*1000));
     };
+    video.onerror = () => reject(new Error('Could not load video'));
+  });
+}
 
-    video.onerror = () => reject(new Error('Could not load video file'));
+// ── SAFE: Frame-by-frame seek (Chrome Android — no memory crashes) ─────
+function compressVideoSeeked(entry) {
+  return new Promise((resolve, reject) => {
+    const video = document.createElement('video');
+    video.muted = true; video.playsInline = true;
+    video.preload = 'auto';
+    const objUrl = URL.createObjectURL(entry.file);
+    video.src = objUrl;
+
+    video.onloadedmetadata = () => {
+      const dur = video.duration || 0;
+      let w = video.videoWidth||1280, h = video.videoHeight||720;
+      const res = state.settings.vidRes;
+      if (res !== 'original' && h > +res) { const r=+res/h; w=Math.round(w*r); h=+res; }
+      if (w > 1280) { const r=1280/w; w=1280; h=Math.round(h*r); }
+      w=w%2===0?w:w-1; h=h%2===0?h:h-1;
+
+      const fps = state.settings.speedMode === 'quality' ? 24 : 20;
+      const frameMs = 1000/fps;
+      const crf = state.settings.vidQuality;
+      const t=(crf-18)/(51-18);
+      const bitsPerSecond = Math.round(6_000_000*Math.pow(100_000/6_000_000, t));
+
+      const canvas = document.createElement('canvas');
+      canvas.width=w; canvas.height=h;
+      const ctx = canvas.getContext('2d', { alpha:false });
+
+      const mimes = ['video/webm;codecs=vp8,opus','video/webm;codecs=vp8','video/webm'];
+      const mimeType = mimes.find(m=>MediaRecorder.isTypeSupported(m))||'video/webm';
+
+      const stream = canvas.captureStream(fps);
+      let audioCtx;
+      try {
+        audioCtx = new (window.AudioContext||window.webkitAudioContext)();
+        const src=audioCtx.createMediaElementSource(video);
+        const dst=audioCtx.createMediaStreamDestination();
+        src.connect(dst); src.connect(audioCtx.destination);
+        dst.stream.getAudioTracks().forEach(tk=>stream.addTrack(tk));
+      } catch(_) {}
+
+      let rec;
+      try { rec=new MediaRecorder(stream,{mimeType,videoBitsPerSecond:bitsPerSecond}); }
+      catch(_) { rec=new MediaRecorder(stream,{videoBitsPerSecond:bitsPerSecond}); }
+
+      const chunks=[];
+      rec.ondataavailable = e => { if(e.data?.size>0) chunks.push(e.data); };
+      rec.onstop = () => {
+        try {
+          entry.blob=new Blob(chunks,{type:rec.mimeType||mimeType});
+          entry.compressedSize=entry.blob.size; entry.ext='webm';
+        } catch(e) { reject(new Error('Build failed: '+e.message)); return; }
+        chunks.length=0;
+        URL.revokeObjectURL(objUrl);
+        clearInterval(drawTimer); clearTimeout(safetyTimer);
+        if(audioCtx) try{audioCtx.close();}catch(_){}
+        setProgress(entry,100); resolve();
+      };
+      rec.onerror = () => { clearInterval(drawTimer); reject(new Error('Recorder error')); };
+
+      let currentTime=0, drawTimer=null, safetyTimer=null, stopped=false;
+
+      function drawNextFrame() {
+        if (stopped) return;
+        if (currentTime > dur) { stopped=true; clearInterval(drawTimer); if(rec.state!=='inactive') rec.stop(); return; }
+        video.currentTime = currentTime;
+      }
+
+      video.onseeked = () => {
+        if (stopped) return;
+        try { ctx.drawImage(video,0,0,w,h); } catch(_) {}
+        setProgress(entry, dur>0?Math.min(92,5+(currentTime/dur)*87):50);
+        currentTime += frameMs/1000;
+      };
+
+      function startSeeking() {
+        if (drawTimer) return;
+        drawTimer = setInterval(() => { if(!stopped) drawNextFrame(); else clearInterval(drawTimer); }, frameMs+20);
+      }
+
+      document.addEventListener('visibilitychange', function onVis() {
+        if (document.visibilityState==='visible' && !stopped && !drawTimer) startSeeking();
+        if (stopped) document.removeEventListener('visibilitychange', onVis);
+      });
+
+      safetyTimer = setTimeout(() => { stopped=true; clearInterval(drawTimer); if(rec.state!=='inactive') rec.stop(); }, Math.max(300000, dur*(fps+5)*100));
+
+      rec.start(2000);
+      setProgress(entry,5);
+      video.currentTime=0;
+      setTimeout(()=>startSeeking(), 100);
+    };
+    video.onerror = () => reject(new Error('Could not load video'));
   });
 }
 
