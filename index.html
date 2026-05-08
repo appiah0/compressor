@@ -220,23 +220,44 @@ let ffmpegReady = false;
 
 async function loadFFmpeg() {
   const banner = document.getElementById('ffmpegBanner');
-  try {
-    ffmpeg = createFFmpeg({
-      log: false,
-      // core-mt = multi-threaded FFmpeg — uses all CPU cores via SharedArrayBuffer
-      corePath: 'https://unpkg.com/@ffmpeg/core-mt@0.11.0/dist/ffmpeg-core.js',
-      progress: ({ ratio }) => {
-        if (window._ffEntry) setProgress(window._ffEntry, Math.min(92, 5 + ratio * 87));
-      },
-    });
-    await ffmpeg.load();
-    ffmpegReady = true;
-    banner.innerHTML = `<span style="font-size:16px">✅</span><span>FFmpeg ready — videos will output as MP4 (H.264)</span>`;
-    banner.classList.add('ready');
-  } catch (err) {
-    banner.classList.add('error');
-    banner.innerHTML = `<span style="font-size:16px">⚠️</span><span>FFmpeg unavailable (${err.message}) — videos will compress as WebM</span>`;
+
+  // Try multiple CDN sources in order — first one that works wins
+  const coreSources = [
+    'https://unpkg.com/@ffmpeg/core@0.11.0/dist/ffmpeg-core.js',
+    'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.11.0/dist/ffmpeg-core.js',
+    'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.11.0/dist/ffmpeg-core.js',
+  ];
+
+  for (let i = 0; i < coreSources.length; i++) {
+    const src = coreSources[i];
+    try {
+      banner.innerHTML = `<div class="ffmpeg-spinner"></div><span>Loading FFmpeg${i > 0 ? ' (retry ' + i + ')' : ''}…</span>`;
+      banner.className = 'ffmpeg-banner';
+
+      ffmpeg = createFFmpeg({
+        log: false,
+        corePath: src,
+        progress: ({ ratio }) => {
+          if (window._ffEntry) setProgress(window._ffEntry, Math.min(92, 5 + ratio * 87));
+        },
+      });
+
+      await ffmpeg.load();
+      ffmpegReady = true;
+      banner.innerHTML = `<span style="font-size:16px">✅</span><span>FFmpeg ready — MP4 (H.264) output enabled</span>`;
+      banner.classList.add('ready');
+      return; // success — stop trying
+    } catch (err) {
+      console.warn('FFmpeg load failed from', src, err.message);
+      ffmpeg = null;
+      // small delay before retry
+      await new Promise(r => setTimeout(r, 1000));
+    }
   }
+
+  // All sources failed
+  banner.classList.add('error');
+  banner.innerHTML = `<span style="font-size:16px">⚠️</span><span>FFmpeg failed to load — videos will compress as WebM instead</span>`;
 }
 loadFFmpeg();
 
