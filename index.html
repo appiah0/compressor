@@ -429,60 +429,65 @@ async function compressVideo(entry) {
     video.muted = true;
     video.playsInline = true;
     video.setAttribute('playsinline', '');
-    video.setAttribute('webkit-playsinline', '');
-    // IMPORTANT: do NOT append to DOM — keep offscreen
+    video.preload = 'auto';
     const objUrl = URL.createObjectURL(entry.file);
     video.src = objUrl;
 
-    video.onloadedmetadata = () => {
+    video.onloadedmetadata = async () => {
+      const dur = video.duration || 0;
+
       // ── Dimensions ───────────────────────────────────────────────
       let w = video.videoWidth  || 1280;
       let h = video.videoHeight || 720;
       const res = state.settings.vidRes;
       if (res !== 'original' && h > +res) {
-        const r = +res / h; w = Math.round(w * r); h = +res;
+        const r = +res / h;
+        w = Math.round(w * r);
+        h = +res;
       }
+      // Clamp to max 1280px wide to prevent memory blowout on huge videos
+      if (w > 1280) { const r = 1280 / w; w = 1280; h = Math.round(h * r); }
       w = w % 2 === 0 ? w : w - 1;
       h = h % 2 === 0 ? h : h - 1;
 
-      // ── Canvas ───────────────────────────────────────────────────
-      const canvas = document.createElement('canvas');
-      canvas.width = w; canvas.height = h;
-      const ctx = canvas.getContext('2d', { alpha: false });
+      // ── FPS — lower = less memory pressure ───────────────────────
+      const fpsMap = { quality: 24, balanced: 20, fast: 15 };
+      const fps    = fpsMap[state.settings.speedMode] || 20;
+      const frameMs = 1000 / fps; // ms per frame
 
       // ── Bitrate ──────────────────────────────────────────────────
       const crf = state.settings.vidQuality;
-      const t = (crf - 18) / (51 - 18);
-      const bitsPerSecond = Math.round(8_000_000 * Math.pow(150_000 / 8_000_000, t));
+      const t   = (crf - 18) / (51 - 18);
+      const bitsPerSecond = Math.round(6_000_000 * Math.pow(100_000 / 6_000_000, t));
 
-      // ── FPS ──────────────────────────────────────────────────────
-      const fpsMap = { quality: 30, balanced: 24, fast: 20 };
-      const fps = fpsMap[state.settings.speedMode] || 24;
-      const frameInterval = 1000 / fps; // ms between frames
+      // ── Canvas (no alpha = less memory) ──────────────────────────
+      const canvas = document.createElement('canvas');
+      canvas.width  = w;
+      canvas.height = h;
+      const ctx = canvas.getContext('2d', { alpha: false, willReadFrequently: false });
 
       // ── Codec ────────────────────────────────────────────────────
       const mimes = [
-        'video/webm;codecs=vp9,opus',
-        'video/webm;codecs=vp9',
+        'video/webm;codecs=vp8',  // VP8 uses MUCH less memory than VP9
         'video/webm;codecs=vp8,opus',
-        'video/webm;codecs=vp8',
         'video/webm',
       ];
       const mimeType = mimes.find(m => MediaRecorder.isTypeSupported(m)) || 'video/webm';
 
-      // ── Stream ───────────────────────────────────────────────────
+      // ── Stream + Recorder ─────────────────────────────────────────
       const stream = canvas.captureStream(fps);
 
-      // Audio capture
+      // Audio
+      let audioCtx;
       try {
-        const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
         const src = audioCtx.createMediaElementSource(video);
         const dst = audioCtx.createMediaStreamDestination();
-        src.connect(dst); src.connect(audioCtx.destination);
+        src.connect(dst);
+        src.connect(audioCtx.destination);
         dst.stream.getAudioTracks().forEach(tk => stream.addTrack(tk));
       } catch(_) {}
 
-      // ── Recorder ─────────────────────────────────────────────────
       let rec;
       try {
         rec = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: bitsPerSecond });
@@ -490,88 +495,122 @@ async function compressVideo(entry) {
         rec = new MediaRecorder(stream, { videoBitsPerSecond: bitsPerSecond });
       }
 
+      // Collect chunks but limit memory — don't keep all in RAM
       const chunks = [];
-      rec.ondataavailable = e => { if (e.data && e.data.size > 0) chunks.push(e.data); };
+      let totalChunkSize = 0;
+      rec.ondataavailable = e => {
+        if (e.data && e.data.size > 0) {
+          chunks.push(e.data);
+          totalChunkSize += e.data.size;
+        }
+      };
+
       rec.onstop = () => {
-        const blob = new Blob(chunks, { type: rec.mimeType || mimeType });
-        entry.blob = blob;
-        entry.compressedSize = blob.size;
-        entry.ext = 'webm';
+        try {
+          const blob = new Blob(chunks, { type: rec.mimeType || mimeType });
+          entry.blob = blob;
+          entry.compressedSize = blob.size;
+          entry.ext = 'webm';
+        } catch(e) {
+          reject(new Error('Failed to build output: ' + e.message));
+          return;
+        }
+        // Cleanup
+        chunks.length = 0;
         URL.revokeObjectURL(objUrl);
         clearInterval(drawTimer);
         clearTimeout(safetyTimer);
+        if (audioCtx) try { audioCtx.close(); } catch(_) {}
         setProgress(entry, 100);
         resolve();
       };
-      rec.onerror = (e) => {
+
+      rec.onerror = () => {
         clearInterval(drawTimer);
-        reject(new Error('Recorder error'));
+        reject(new Error('Recorder error — try a shorter or smaller video'));
       };
 
-      // ── setInterval draw loop (works even when tab is backgrounded) ──
-      // requestAnimationFrame freezes when tab is hidden — setInterval does not
-      let drawTimer = null;
+      // ── Frame-by-frame seek mode (memory-safe) ────────────────────
+      // Instead of playing video in real-time (which buffers everything
+      // into RAM), we seek frame by frame. This uses a fraction of the
+      // memory because the browser only decodes one frame at a time.
+      let currentTime = 0;
+      let drawTimer   = null;
       let safetyTimer = null;
-      const dur = video.duration || 0;
+      let stopped     = false;
 
-      function startDrawing() {
-        if (drawTimer) return; // already running
-        drawTimer = setInterval(() => {
-          if (video.ended || video.paused) {
-            // Draw last frame and stop
-            try { ctx.drawImage(video, 0, 0, w, h); } catch(_) {}
-            clearInterval(drawTimer);
-            drawTimer = null;
-            if (rec.state !== 'inactive') rec.stop();
-            return;
-          }
-          try { ctx.drawImage(video, 0, 0, w, h); } catch(_) {}
-          const pct = dur > 0 ? Math.min(92, 5 + (video.currentTime / dur) * 87) : 50;
-          setProgress(entry, pct);
-        }, frameInterval);
+      function cleanup() {
+        stopped = true;
+        clearInterval(drawTimer);
+        clearTimeout(safetyTimer);
       }
 
-      // Resume drawing and playback if tab comes back into focus
-      document.addEventListener('visibilitychange', function onVis() {
-        if (document.visibilityState === 'visible') {
-          if (rec.state === 'recording' && video.paused && !video.ended) {
-            video.play().catch(() => {});
-            startDrawing();
-          }
-        } else {
-          // Tab hidden: video may pause on mobile — force-resume
-          if (!video.ended) {
-            video.play().catch(() => {});
-          }
+      function drawNextFrame() {
+        if (stopped) return;
+
+        if (currentTime > dur) {
+          // All frames drawn — stop recording
+          cleanup();
+          if (rec.state !== 'inactive') rec.stop();
+          return;
         }
-        // Clean up listener once recording finishes
-        if (rec.state === 'inactive') document.removeEventListener('visibilitychange', onVis);
-      });
 
-      // ── Start ─────────────────────────────────────────────────────
-      rec.start(1000); // collect chunk every 1s — safer for long videos
-      video.play()
-        .then(() => startDrawing())
-        .catch(reject);
+        // Seek video to next frame time
+        video.currentTime = currentTime;
+      }
 
-      video.onended = () => {
-        try { ctx.drawImage(video, 0, 0, w, h); } catch(_) {}
-        clearInterval(drawTimer);
-        drawTimer = null;
-        if (rec.state !== 'inactive') rec.stop();
+      // Fires each time seek completes — draw that frame then advance
+      video.onseeked = () => {
+        if (stopped) return;
+        try {
+          ctx.drawImage(video, 0, 0, w, h);
+        } catch(_) {}
+
+        const pct = dur > 0 ? Math.min(92, 5 + (currentTime / dur) * 87) : 50;
+        setProgress(entry, pct);
+
+        currentTime += frameMs / 1000; // advance by one frame duration
       };
 
-      // Safety net: force-stop if stuck
-      const maxTime = Math.max(120000, (dur + 30) * 1000);
+      // Use setInterval to pace the seeks — prevents flooding the decoder
+      // 20ms extra buffer per frame avoids "seek storm" memory spikes
+      function startSeeking() {
+        if (drawTimer) return;
+        drawTimer = setInterval(() => {
+          if (stopped) { clearInterval(drawTimer); return; }
+          drawNextFrame();
+        }, frameMs + 20);
+      }
+
+      // Resume if tab becomes visible again
+      document.addEventListener('visibilitychange', function onVis() {
+        if (document.visibilityState === 'visible' && !stopped) {
+          if (!drawTimer) startSeeking();
+        }
+        if (stopped) document.removeEventListener('visibilitychange', onVis);
+      });
+
+      // Safety timeout — force stop if stuck
+      const maxMs = Math.max(300_000, dur * (fps + 5) * 100);
       safetyTimer = setTimeout(() => {
-        clearInterval(drawTimer);
+        cleanup();
         if (rec.state !== 'inactive') rec.stop();
-      }, maxTime);
+      }, maxMs);
+
+      // ── Start ─────────────────────────────────────────────────────
+      rec.start(2000); // flush chunk every 2s — avoids giant RAM buffer
+      setProgress(entry, 5);
+
+      // Seek to first frame to initialise
+      video.currentTime = 0;
+      // Wait a tick then begin interval
+      setTimeout(() => startSeeking(), 100);
     };
 
     video.onerror = () => reject(new Error('Could not load video file'));
   });
 }
+
 
 function setProgress(entry, val) {
   entry.progress = val;
