@@ -428,10 +428,14 @@ async function compressVideo(entry) {
     const video = document.createElement('video');
     video.muted = true;
     video.playsInline = true;
-    video.src = URL.createObjectURL(entry.file);
+    video.setAttribute('playsinline', '');
+    video.setAttribute('webkit-playsinline', '');
+    // IMPORTANT: do NOT append to DOM — keep offscreen
+    const objUrl = URL.createObjectURL(entry.file);
+    video.src = objUrl;
 
     video.onloadedmetadata = () => {
-      // ── Target dimensions ────────────────────────────────────────
+      // ── Dimensions ───────────────────────────────────────────────
       let w = video.videoWidth  || 1280;
       let h = video.videoHeight || 720;
       const res = state.settings.vidRes;
@@ -444,19 +448,19 @@ async function compressVideo(entry) {
       // ── Canvas ───────────────────────────────────────────────────
       const canvas = document.createElement('canvas');
       canvas.width = w; canvas.height = h;
-      const ctx = canvas.getContext('2d');
+      const ctx = canvas.getContext('2d', { alpha: false });
 
-      // ── Bitrate from quality slider ───────────────────────────────
-      // Quality 18 (best) → 8Mbps, Quality 51 (smallest) → 150kbps
+      // ── Bitrate ──────────────────────────────────────────────────
       const crf = state.settings.vidQuality;
       const t = (crf - 18) / (51 - 18);
       const bitsPerSecond = Math.round(8_000_000 * Math.pow(150_000 / 8_000_000, t));
 
-      // ── FPS from speed mode ───────────────────────────────────────
+      // ── FPS ──────────────────────────────────────────────────────
       const fpsMap = { quality: 30, balanced: 24, fast: 20 };
       const fps = fpsMap[state.settings.speedMode] || 24;
+      const frameInterval = 1000 / fps; // ms between frames
 
-      // ── Best available codec ──────────────────────────────────────
+      // ── Codec ────────────────────────────────────────────────────
       const mimes = [
         'video/webm;codecs=vp9,opus',
         'video/webm;codecs=vp9',
@@ -466,18 +470,19 @@ async function compressVideo(entry) {
       ];
       const mimeType = mimes.find(m => MediaRecorder.isTypeSupported(m)) || 'video/webm';
 
-      // ── Stream + Recorder ─────────────────────────────────────────
+      // ── Stream ───────────────────────────────────────────────────
       const stream = canvas.captureStream(fps);
 
-      // Capture audio
+      // Audio capture
       try {
         const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
         const src = audioCtx.createMediaElementSource(video);
         const dst = audioCtx.createMediaStreamDestination();
         src.connect(dst); src.connect(audioCtx.destination);
-        dst.stream.getAudioTracks().forEach(t => stream.addTrack(t));
+        dst.stream.getAudioTracks().forEach(tk => stream.addTrack(tk));
       } catch(_) {}
 
+      // ── Recorder ─────────────────────────────────────────────────
       let rec;
       try {
         rec = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: bitsPerSecond });
@@ -492,40 +497,79 @@ async function compressVideo(entry) {
         entry.blob = blob;
         entry.compressedSize = blob.size;
         entry.ext = 'webm';
-        URL.revokeObjectURL(video.src);
+        URL.revokeObjectURL(objUrl);
+        clearInterval(drawTimer);
+        clearTimeout(safetyTimer);
         setProgress(entry, 100);
         resolve();
       };
-      rec.onerror = () => reject(new Error('Recorder error'));
+      rec.onerror = (e) => {
+        clearInterval(drawTimer);
+        reject(new Error('Recorder error'));
+      };
 
-      // ── Draw loop ─────────────────────────────────────────────────
-      rec.start(500);
-      video.play().catch(reject);
-
+      // ── setInterval draw loop (works even when tab is backgrounded) ──
+      // requestAnimationFrame freezes when tab is hidden — setInterval does not
+      let drawTimer = null;
+      let safetyTimer = null;
       const dur = video.duration || 0;
-      let rafId;
-      function draw() {
-        if (video.paused || video.ended) {
-          ctx.drawImage(video, 0, 0, w, h);
-          if (rec.state !== 'inactive') rec.stop();
-          return;
-        }
-        ctx.drawImage(video, 0, 0, w, h);
-        setProgress(entry, Math.min(92, 5 + (dur > 0 ? (video.currentTime / dur) * 87 : 40)));
-        rafId = requestAnimationFrame(draw);
-      }
-      video.onplay   = () => { rafId = requestAnimationFrame(draw); };
-      video.onended  = () => { cancelAnimationFrame(rafId); ctx.drawImage(video,0,0,w,h); if(rec.state!=='inactive') rec.stop(); };
-      video.onerror  = () => reject(new Error('Video playback error'));
 
-      // Safety timeout
-      setTimeout(() => {
-        cancelAnimationFrame(rafId);
+      function startDrawing() {
+        if (drawTimer) return; // already running
+        drawTimer = setInterval(() => {
+          if (video.ended || video.paused) {
+            // Draw last frame and stop
+            try { ctx.drawImage(video, 0, 0, w, h); } catch(_) {}
+            clearInterval(drawTimer);
+            drawTimer = null;
+            if (rec.state !== 'inactive') rec.stop();
+            return;
+          }
+          try { ctx.drawImage(video, 0, 0, w, h); } catch(_) {}
+          const pct = dur > 0 ? Math.min(92, 5 + (video.currentTime / dur) * 87) : 50;
+          setProgress(entry, pct);
+        }, frameInterval);
+      }
+
+      // Resume drawing and playback if tab comes back into focus
+      document.addEventListener('visibilitychange', function onVis() {
+        if (document.visibilityState === 'visible') {
+          if (rec.state === 'recording' && video.paused && !video.ended) {
+            video.play().catch(() => {});
+            startDrawing();
+          }
+        } else {
+          // Tab hidden: video may pause on mobile — force-resume
+          if (!video.ended) {
+            video.play().catch(() => {});
+          }
+        }
+        // Clean up listener once recording finishes
+        if (rec.state === 'inactive') document.removeEventListener('visibilitychange', onVis);
+      });
+
+      // ── Start ─────────────────────────────────────────────────────
+      rec.start(1000); // collect chunk every 1s — safer for long videos
+      video.play()
+        .then(() => startDrawing())
+        .catch(reject);
+
+      video.onended = () => {
+        try { ctx.drawImage(video, 0, 0, w, h); } catch(_) {}
+        clearInterval(drawTimer);
+        drawTimer = null;
         if (rec.state !== 'inactive') rec.stop();
-      }, Math.max(60000, (dur + 20) * 1000));
+      };
+
+      // Safety net: force-stop if stuck
+      const maxTime = Math.max(120000, (dur + 30) * 1000);
+      safetyTimer = setTimeout(() => {
+        clearInterval(drawTimer);
+        if (rec.state !== 'inactive') rec.stop();
+      }, maxTime);
     };
 
-    video.onerror = () => reject(new Error('Could not load video'));
+    video.onerror = () => reject(new Error('Could not load video file'));
   });
 }
 
@@ -626,6 +670,41 @@ new MutationObserver(() => {
 }).observe(queue, { childList: true });
 </script>
 <script>
+// ── Background + Unload Protection ────────────────────────────────────
+// Prevent browser from killing the page mid-compression
+window.addEventListener('beforeunload', e => {
+  const compressing = state && state.files && state.files.some(f => f.status === 'processing');
+  if (compressing) {
+    e.preventDefault();
+    e.returnValue = 'Video compression is in progress. Are you sure you want to leave?';
+    return e.returnValue;
+  }
+});
+
+// Stop browser suspending page when hidden (mobile Safari / Chrome)
+let _noSleepVideo = null;
+function enableNoSleep() {
+  // Trick: play a tiny silent video loop — keeps the audio session alive
+  // which prevents aggressive background tab suspension on mobile
+  if (_noSleepVideo) return;
+  _noSleepVideo = document.createElement('video');
+  _noSleepVideo.setAttribute('playsinline', '');
+  _noSleepVideo.setAttribute('muted', '');
+  _noSleepVideo.muted = true;
+  _noSleepVideo.loop = true;
+  // 1x1 transparent webm (base64) — smallest valid video
+  _noSleepVideo.src = 'data:video/webm;base64,GkXfowEAAAAAAAAfQoaBAUL3gQFC8oEEQvOBCEKChHdlYm1Ch4ECQoWBAhhTgGcBAAAAAAACWxFNm3RALE27i1OrhBVJqWZTrIHfTbuMU6uEFlSua1OsggEuTbuMU6uEHFO7a1OsggI+7AEAAAAAAACkAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAVSalmAQAAAAAAAEUq17GDD0JATYCNTGF2ZjU4LjEyLjEwMFdBjUxhdmY1OC4xMi4xMDBEiYhARAAAAAAAABZUrmsBAAAAAAAAHlmsAQAAAAAAABHe0AEAAAAAAAASZbABAAAAAAAAD7sBAAAAAAAAGFLcrAEAAAAAAAAbY3JlYXRlZEJZIEdvb2dsZSA=';
+  document.body.appendChild(_noSleepVideo);
+  _noSleepVideo.play().catch(() => {});
+}
+function disableNoSleep() {
+  if (_noSleepVideo) {
+    _noSleepVideo.pause();
+    _noSleepVideo.remove();
+    _noSleepVideo = null;
+  }
+}
+
 // ── Service Worker + Background Keep-Alive ────────────────────────────
 let _wakeLock = null;
 let _keepAliveInterval = null;
@@ -646,8 +725,9 @@ function releaseWakeLock() {
 
 function startKeepAlive() {
   acquireWakeLock();
+  enableNoSleep(); // keep mobile browser alive
   // Ping service worker every 20s to keep it alive
-  if (navigator.serviceWorker.controller) {
+  if (navigator.serviceWorker && navigator.serviceWorker.controller) {
     _keepAliveInterval = setInterval(() => {
       const ch = new MessageChannel();
       navigator.serviceWorker.controller.postMessage({ type: 'KEEP_ALIVE' }, [ch.port2]);
@@ -657,6 +737,7 @@ function startKeepAlive() {
 
 function stopKeepAlive() {
   releaseWakeLock();
+  disableNoSleep();
   if (_keepAliveInterval) { clearInterval(_keepAliveInterval); _keepAliveInterval = null; }
 }
 
