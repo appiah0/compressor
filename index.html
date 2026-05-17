@@ -131,23 +131,12 @@
   <div class="drop-zone" id="dropZone">
     <div class="drop-icon">⚡</div>
     <div class="drop-title">Drop files here or click to browse</div>
-    <div class="drop-sub">Images only · Client-side · Files never leave your device</div>
+    <div class="drop-sub">Client-side compression · Files never leave your device</div>
     <div class="drop-tags">
       <span class="tag">JPG</span><span class="tag">PNG</span><span class="tag">WEBP</span>
-      <span class="tag">GIF</span>
+      <span class="tag">GIF</span><span class="tag">MP4</span><span class="tag">MOV</span><span class="tag">WEBM</span>
     </div>
-    <input type="file" id="fileInput" multiple accept="image/*">
-  </div>
-
-  <!-- Video recommendation banner -->
-  <div style="background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:16px 20px;margin-bottom:16px;display:flex;align-items:flex-start;gap:12px;font-size:11px;color:var(--muted);letter-spacing:0.5px;line-height:1.6">
-    <span style="font-size:20px;flex-shrink:0">🎬</span>
-    <span>
-      <strong style="color:var(--text);display:block;margin-bottom:4px">For video compression, use a free native app:</strong>
-      <b style="color:var(--accent)">Android:</b> VidCompact · HandBrake · Video Compress<br>
-      <b style="color:var(--accent)">iPhone:</b> Video Compress · Handbrake · Claquette<br>
-      <b style="color:var(--accent)">Desktop:</b> HandBrake (free, all platforms) — the gold standard
-    </span>
+    <input type="file" id="fileInput" multiple accept="image/*,video/*">
   </div>
 
   <div class="settings-panel">
@@ -156,6 +145,13 @@
       <div class="slider-row">
         <input type="range" id="imgQuality" min="10" max="100" value="80">
         <span class="slider-val" id="imgQualityVal">80%</span>
+      </div>
+    </div>
+    <div class="setting-card">
+      <div class="setting-label"><span class="dot" style="background:var(--accent2)"></span>Video Quality (CRF)</div>
+      <div class="slider-row">
+        <input type="range" id="vidQuality" min="18" max="51" value="28">
+        <span class="slider-val" id="vidQualityVal" style="color:var(--accent2)">28</span>
       </div>
     </div>
 
@@ -406,16 +402,6 @@ function compressImage(entry) {
     img.onerror = () => reject(new Error('Could not load image'));
     img.src = URL.createObjectURL(entry.file);
   });
-}
-
-// ── Video (FFmpeg v0.11 → MP4, with WebM fallback) ─────────────────────
-async function compressVideo(entry) {
-  // Chrome on Android crashes with real-time playback on large files.
-  // Firefox/Edge handle it fine. Let the user pick via Speed Mode:
-  // "Fastest" = real-time (fast, may crash Chrome on big files)
-  // "Balanced" / "Best Quality" = frame-seek (safe on all browsers)
-  const useRealtime = state.settings.speedMode === 'fast';
-  return useRealtime ? compressVideoRealtime(entry) : compressVideoSeeked(entry);
 }
 
 // ── Video Compression ─────────────────────────────────────────────────
