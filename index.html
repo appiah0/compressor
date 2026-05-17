@@ -126,20 +126,28 @@
     <div class="header-stats"><strong id="totalSaved">0 MB</strong>TOTAL SAVED</div>
   </header>
 
-  <div class="ffmpeg-banner ready" id="ffmpegBanner">
-    <span style="font-size:16px">✅</span>
-    <span>Video compression ready — outputs compressed WebM (VP9)</span>
-  </div>
+
 
   <div class="drop-zone" id="dropZone">
     <div class="drop-icon">⚡</div>
     <div class="drop-title">Drop files here or click to browse</div>
-    <div class="drop-sub">Client-side compression · Files never leave your device</div>
+    <div class="drop-sub">Images only · Client-side · Files never leave your device</div>
     <div class="drop-tags">
       <span class="tag">JPG</span><span class="tag">PNG</span><span class="tag">WEBP</span>
-      <span class="tag">GIF</span><span class="tag">MP4</span><span class="tag">MOV</span><span class="tag">WEBM</span>
+      <span class="tag">GIF</span>
     </div>
-    <input type="file" id="fileInput" multiple accept="image/*,video/*">
+    <input type="file" id="fileInput" multiple accept="image/*">
+  </div>
+
+  <!-- Video recommendation banner -->
+  <div style="background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:16px 20px;margin-bottom:16px;display:flex;align-items:flex-start;gap:12px;font-size:11px;color:var(--muted);letter-spacing:0.5px;line-height:1.6">
+    <span style="font-size:20px;flex-shrink:0">🎬</span>
+    <span>
+      <strong style="color:var(--text);display:block;margin-bottom:4px">For video compression, use a free native app:</strong>
+      <b style="color:var(--accent)">Android:</b> VidCompact · HandBrake · Video Compress<br>
+      <b style="color:var(--accent)">iPhone:</b> Video Compress · Handbrake · Claquette<br>
+      <b style="color:var(--accent)">Desktop:</b> HandBrake (free, all platforms) — the gold standard
+    </span>
   </div>
 
   <div class="settings-panel">
@@ -150,13 +158,7 @@
         <span class="slider-val" id="imgQualityVal">80%</span>
       </div>
     </div>
-    <div class="setting-card">
-      <div class="setting-label"><span class="dot" style="background:var(--accent2)"></span>Video Quality (CRF)</div>
-      <div class="slider-row">
-        <input type="range" id="vidQuality" min="18" max="51" value="28">
-        <span class="slider-val" id="vidQualityVal" style="color:var(--accent2)">28</span>
-      </div>
-    </div>
+
     <div class="setting-card">
       <div class="setting-label"><span class="dot" style="background:var(--accent3)"></span>Output Format — Images</div>
       <div class="btn-group" id="imgFormat">
@@ -175,24 +177,8 @@
         <button class="btn-opt" data-val="720">720</button>
       </div>
     </div>
-    <div class="setting-card full">
-      <div class="setting-label"><span class="dot" style="background:var(--muted)"></span>Video Resolution</div>
-      <div class="btn-group" id="vidRes">
-        <button class="btn-opt active" data-val="original">ORIGINAL</button>
-        <button class="btn-opt" data-val="1080">1080p</button>
-        <button class="btn-opt" data-val="720">720p</button>
-        <button class="btn-opt" data-val="480">480p</button>
-      </div>
-    </div>
-    <div class="setting-card full">
-      <div class="setting-label"><span class="dot" style="background:var(--accent3)"></span>Compression Speed</div>
-      <div class="btn-group" id="speedMode">
-        <button class="btn-opt" data-val="quality">🏆 BEST QUALITY</button>
-        <button class="btn-opt active" data-val="balanced">⚡ BALANCED</button>
-        <button class="btn-opt" data-val="fast">🚀 FASTEST (Firefox/Edge)</button>
-      </div>
-      <div style="margin-top:10px;font-size:10px;color:var(--muted);letter-spacing:0.5px" id="speedNote">⚡ Balanced: safe on all browsers, good quality</div>
-    </div>
+
+
   </div>
 
   <div class="summary" id="summary">
